@@ -1,4 +1,5 @@
 #!/bin/bash
+# 2024.11.28 by dralee
 file=$1
 path=${file%/*} # file path
 full_file=${file##*/} # file.xx
