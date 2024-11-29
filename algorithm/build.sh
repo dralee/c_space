@@ -4,8 +4,15 @@ file=$1
 path=${file%/*} # file path
 full_file=${file##*/} # file.xx
 raw_file=${full_file%.*} # raw file name without extension
+ext=${full_file##*.} # extension
 out_dir=out
 res_file=$out_dir/$raw_file.out
+
+CC=gcc
+if [ "$ext" = "cpp" ]
+then
+	CC=g++
+fi
 
 if [ -z "$file" ]
 then
@@ -17,7 +24,7 @@ else
 fi
 
 echo build $file to $res_file
-gcc $file -o $res_file
+$CC $file -o $res_file
 
 echo run $res_file
 echo ========================================
