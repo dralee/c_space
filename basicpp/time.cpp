@@ -40,6 +40,8 @@ Format Specifier	Description	Example
 %S	Seconds within a minute	01
 %y	2-digit year representation	23
 %Y	4-digit year representation	2023
+
+The clock() function is useful for measuring short intervals of time while the program is running. It is more precise than the difftime() function.
  */
 #include <ctime>
 #include <iostream>
@@ -147,6 +149,15 @@ void different_time(){
 	cout<<diff<<" seconds until next year"<<endl;
 }
 
+void clock_time(){
+	clock_t before = clock();
+	int k = 0;
+	for(int i = 0; i < 100000; ++i){
+		k += i;
+	}
+	clock_t duration = clock() - before;
+	cout<<"Duration: "<<(float)duration/CLOCKS_PER_SEC<<" seconds";
+}
 
 int main(int argc, char **argv) {
     now();
@@ -160,6 +171,8 @@ int main(int argc, char **argv) {
 	format_time();
 
 	different_time();
+
+	clock_time();
 
     return 0;
 }
