@@ -1,7 +1,8 @@
 /*
  * stl(Standard Template Library)
  * algorithm, sort(), find()
- * 2024.12.03 by dralee
+ * library has many functions that allow you to modify ranges of data from data
+ * structures. 2024.12.03 by dralee 2024.12.06 by dralee others algorithm
  */
 #include <algorithm>
 #include <iostream>
@@ -254,12 +255,30 @@ void advance_alg2() {
     cout << endl;
 }
 
+void other_alg1() {
+    vector<string> cars = {"Volvo", "BYD", "BMW", "BYD", "Ford", "Mazda"};
+    int amount = count(cars.begin(), cars.end(), "BYD");
+    cout << "BYD appears " << amount << " times" << endl;
+
+    vector<int> numbers = {1, 7, 3, 5, 9, 2};
+    vector<int> target = {3, 5, 9};
+
+    if (search(numbers.begin(), numbers.end(), target.begin(), target.end()) !=
+        numbers.end()) {
+        cout << "Target was found";
+    } else {
+        cout << "The target was not found";
+    }
+}
+
 int main(int argc, char **argv) {
     basic_alg();
 
     advance_alg();
 
     advance_alg2();
+
+    other_alg1();
 
     return 0;
 }
