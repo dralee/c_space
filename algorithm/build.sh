@@ -1,6 +1,8 @@
 #!/bin/bash
 # 2024.11.28 by dralee
-file=$1
+# 2025.12.11 by dralee support gdb
+file=$1     # the source file
+dbg=$2      # the debug flag, eg: -g
 path=${file%/*} # file path
 full_file=${file##*/} # file.xx
 raw_file=${full_file%.*} # raw file name without extension
@@ -24,8 +26,21 @@ else
 fi
 
 echo build $file to $res_file
-$CC $file -o $res_file
+$CC $file -o $res_file $dbg
+
+if [ ! -f "$res_file" ]
+then
+	echo error for build $res_file
+	exit 1
+fi
+
+if [ "$dbg" = "-g" ]; then
+	echo debug the file $res_file
+	gdb $res_file
+	exit 0
+fi
 
 echo run $res_file
 echo ========================================
 ./$res_file
+
