@@ -2,12 +2,12 @@
  * Robin Hood Hashing（开放寻址）
 特点：
 开放寻址（线性 probing）+ Robin Hood 规则
-key/value 均为 string（你可以替换成泛型）
+key/value 均为 void*（泛型）
 使用“距离（probe distance）”来决定抢位置
 使用 TOMBSTONE（墓碑）标记删除
 自动扩容（load factor > 0.7）
  *
- * 2025.12.11 by dralee
+ * 2025.12.12 by dralee
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,11 +16,15 @@ key/value 均为 string（你可以替换成泛型）
 #define INITIAL_CAPACITY 8
 #define LOAD_FACTOR_LIMIT 0.7
 
+typedef unsigned (*hash_func)(const void*);
+typedef int (*key_eq_func)(const void*, const void*);
+typedef void (*free_func)(void*);
+
 typedef enum { EMPTY, FILLED, TOMBSTONE } EntryState;
 
 typedef struct {
-        char* key;
-        char* value;
+        void* key;
+        void* value;
         int dist;         // probe distance
         EntryState state; // EMPTY FILLED TOMBSTONE
 } Entry;
@@ -29,51 +33,43 @@ typedef struct {
         Entry *table;
         int size;
         int capacity;
+
+        hash_func hash;
+        key_eq_func key_eq;
+
+        free_func free_key;
+        free_func free_value;
 } RobinHoodHash;
 
-// simple hash
-static inline unsigned int hash_int(const char* s) {
-    if(s == NULL) return 0;
+static void rh_resize(RobinHoodHash *rh);
+static void entry_free(RobinHoodHash *rh, Entry *entry);
 
-    unsigned int x = 0;
-    for (int i = 0; i < strlen(s); i++) {
-        x |= s[i];
-        // mix bits
-        x ^= x >> 16;
-        x *= 0x7feb352d;
-        x ^= x >> 15;
-        x *= 0x96e6a2a7;
-        x ^= x >> 16;
-    }
-    return x;
-}
-
-RobinHoodHash *rh_create() {
+RobinHoodHash *rh_create(hash_func hash, key_eq_func key_eq, 
+    free_func free_key, free_func free_value) {
     RobinHoodHash *rh = malloc(sizeof(RobinHoodHash));
     rh->size = 0;
     rh->capacity = INITIAL_CAPACITY;
     rh->table = calloc(rh->capacity, sizeof(Entry));
+
+    rh->hash = hash;
+    rh->key_eq = key_eq;
+    rh->free_key = free_key;
+    rh->free_value = free_value;
+
     return rh;
 }
 
-static void rh_resize(RobinHoodHash *rh);
-
-static inline void entry_free(Entry *entry) {
-    free(entry->key);
-    free(entry->value);
-}
 
 // insert / update
-void rh_insert(RobinHoodHash *rh, char* key, char* value) {
+void rh_insert(RobinHoodHash *rh, void* key, void* value) {
     if ((float)rh->size / rh->capacity > LOAD_FACTOR_LIMIT) {
         rh_resize(rh);
     }
 
-    unsigned hash = hash_int(key);
+    unsigned hash = rh->hash(key);
     int index = hash % rh->capacity;
-    int dist = 0;
-
-    Entry new_entry = {key, value, dist, FILLED};
+    
+    Entry new_entry = {key, value, 0, FILLED};
 
     while (1) {
         Entry *slot = &rh->table[index];
@@ -85,10 +81,12 @@ void rh_insert(RobinHoodHash *rh, char* key, char* value) {
             return;
         }
 
-        if (strcmp(slot->key, key) == 0 && slot->state == FILLED) {
+        if (rh->key_eq(slot->key, key) && slot->state == FILLED) {
             // update value
+            if(rh->free_value) {
+                rh->free_value(slot->value);
+            }
             slot->value = value;
-            free(key);
             return;
         }
 
@@ -106,8 +104,8 @@ void rh_insert(RobinHoodHash *rh, char* key, char* value) {
     }
 }
 
-const char *rh_get(RobinHoodHash *rh, char* key) {
-    unsigned hash = hash_int(key);
+const void* rh_get(RobinHoodHash *rh, const void* key) {
+    unsigned hash = rh->hash(key);
     int index = hash % rh->capacity;
     int dist = 0;
 
@@ -117,8 +115,7 @@ const char *rh_get(RobinHoodHash *rh, char* key) {
         if (slot->state == EMPTY) {
             return NULL;
         }
-        if (slot->state == FILLED && strcmp(slot->key, key) == 0) {
-            printf("found %s=%s\n", slot->key, slot->value);
+        if (slot->state == FILLED && rh->key_eq(slot->key, key)) {
             return slot->value;
         }
 
@@ -132,8 +129,8 @@ const char *rh_get(RobinHoodHash *rh, char* key) {
     }
 }
 
-int rh_delete(RobinHoodHash *rh, char* key) {
-    unsigned hash = hash_int(key);
+int rh_delete(RobinHoodHash *rh, const void* key) {
+    unsigned hash = rh->hash(key);
     int index = hash % rh->capacity;
     int dist = 0;
 
@@ -144,8 +141,8 @@ int rh_delete(RobinHoodHash *rh, char* key) {
             return 0; // not found
         }
 
-        if (slot->state == FILLED && strcmp(slot->key, key) == 0) {
-            entry_free(slot);
+        if (slot->state == FILLED && rh->key_eq(slot->key, key)) {
+            entry_free(rh, slot);
             slot->state = TOMBSTONE;
             rh->size--;
             return 1;
@@ -180,38 +177,69 @@ static void rh_resize(RobinHoodHash *rh) {
 
 void rh_free(RobinHoodHash *rh) {
     for(int i = 0; i < rh->capacity; i++){
-        if(rh->table[i].state != FILLED) continue;        
-        free(rh->table[i].key);
-        free(rh->table[i].value);
+        if(rh->table[i].state != FILLED) continue;
+        if(rh->free_key){
+            rh->free_key(rh->table[i].key);
+        }
+        if(rh->free_value){
+            rh->free_value(rh->table[i].value);
+        }
     }
     free(rh->table);
     free(rh);
 }
 
+static inline void entry_free(RobinHoodHash *rh, Entry *entry) {
+    if (rh->free_key) {
+        rh->free_key(entry->key);
+    }
+    if (rh->free_value) {
+        rh->free_value(entry->value);
+    }
+}
+
+/*
+* example for key=string, value=int*
+*/
+unsigned str_hash(const void *p){
+    const char *s = p;
+    unsigned h = 5381;
+    while (*s)
+    {
+        h = ((h << 5) + h) + *s; /* hash * 33 + c */
+        s++;
+    }
+    return h;
+}
+
+int str_eq(const void *a, const void *b){
+    return strcmp((const char*)a, (const char*)b) == 0;
+}
+
+void free_int(void *p){ free(p); }
+void free_str(void *p){ free(p); }
+
 int main() {
-    RobinHoodHash *rh = rh_create();
+    RobinHoodHash *rh = rh_create(str_hash, str_eq, free_str, free_int);
     for (int i = 0; i < 20; ++i) {
-        char* key = malloc(10);
+        void* key = malloc(10);  // strdup("alice")
         if(!sprintf(key, "key-%d", i)){
             printf("error for malloc key.");
             return 1;
         }
-        char* value = malloc(10);
-        if(!sprintf(value, "value-%d", i*10)){
-            printf("error for malloc value.");
-            return 1;
-        }
+        int* value = malloc(sizeof(int));
+        *value = i*10;
         rh_insert(rh, key, value);
     }
 
-    char* k10 = malloc(10);
+    void* k10 = malloc(10);
     if(!sprintf(k10, "key-%d", 10)){
         printf("error for malloc key-10.");
         return 1;
     }
-    const char *val = rh_get(rh, k10);
+    const int *val = rh_get(rh, k10);
     if (val) {
-        printf("key 10 -> %s\n", val);
+        printf("key 10 -> %d\n", *val);
     }
 
     rh_delete(rh, k10);
