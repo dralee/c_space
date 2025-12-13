@@ -28,7 +28,7 @@ Epoch-Based Reclamation (EBR) 的版本
 
 -std=gnu11 -pthread 编译
 
-gcc -std=gnu11 -pthread hash-robinhood4.c -O2 -o hash-robinhood4
+gcc -std=gnu11 -pthread hash-robinhood5.c -O2 -o hash-robinhood5
  *
  * 2025.12.12 by dralee
  */
@@ -169,19 +169,19 @@ void ebr_thread_unregister(void) {
     atomic_fetch_add(&global_epoch, 1);
     // perform scan to free retire list nodes if possible
     // we'll call ebr_scan() below which is safe
-    // Note: erb_scan operates globally; here we do a quick local free for remaining safe nodes
+    // Note: ebr_scan operates globally; here we do a quick local free for remaining safe nodes
     // We'll reuse ebr_scan (but need to unlock if help)
     // call scan
     // for simplicity, allow other threads to participate: call ebr_scan from this thread
     // but must make sure to set active=0 first (done)
     // run scan once
     // Note: ebr_scan is defined later; to avoid implicit decl, ensure prototype already declared
-    extern void erb_scan(void);
-    erb_scan();
+    extern void ebr_scan(void);
+    ebr_scan();
     // now free any still-retired nodes by waiting until safe (we'll spin a bit)
     // Simpler: leave them for others; but we try a few attempts to free them
     for(int attempt = 0; attempt < 3; ++attempt){
-        erb_scan();
+        ebr_scan();
         if(ebr_table[id].retire_list == NULL){
             break;
         }
@@ -251,8 +251,27 @@ static void ebr_retire_entry(Entry *entry) {
         atomic_fetch_add(&global_epoch, 1);
         // run a scan to try reclaiming
         extern void ebr_scan(void);
-        erb_scan();
+        ebr_scan();
     }
+}
+
+/* compute minimum epoch among active threads (consider only active records) */
+static unsigned ebr_min_active_epoch(void) {
+    unsigned min_epoch = (unsigned)atomic_load(&global_epoch);
+    for(int i = 0; i < MAX_THREADS; ++i){
+        if(!ebr_table[i].in_use) {
+            continue;
+        }
+        uintptr_t act = atomic_load(&ebr_table[i].active);
+        if(act == 0){
+            continue; // not active
+        }
+        unsigned local_epoch = (unsigned)((act >> 1) & 0xffffffffu);
+        if(local_epoch < min_epoch){
+            min_epoch = local_epoch;
+        }
+    }
+    return min_epoch;
 }
 
 /* scan all threads' retire lists and free nodes with retire_epoch < min_active_epoch */
@@ -316,20 +335,33 @@ void ebr_free_entry_resources(Entry *e) {
 }
 
 /* -------------------------------------------- map functions (lock-free Robin Hood) -------------------------------------------- */
-// create a fixed capacity map(capacity must be >= 2)
+
+// create map with fixed capacity (must be >= 2 and power of two will be chosen)
 RobinHoodHash *rh_create(size_t capacity, hash_func hash, key_eq_func key_eq, 
     free_func free_key, free_func free_value) {
+    if(capacity < 2) {
+        capacity = 2;
+    }
+
     // round up to power of two for nicer modulo (optional)
     size_t cap = 1;
     while (cap < capacity) {
         cap <<= 1;
     }
+    if(cap > MAX_CAPACITY){
+        cap = MAX_CAPACITY;
+    }
+
     RobinHoodHash *rh = malloc(sizeof(RobinHoodHash));
     if(!rh){
         return NULL;
     }
     rh->capacity = cap;
     rh->table = calloc(cap, sizeof(atomic_uintptr_t));
+    if(!rh->table){
+        free(rh);
+        return NULL;
+    }
     for(size_t i = 0; i < cap; i++){
         atomic_init(&rh->table[i], (uintptr_t)0);
     }
@@ -340,17 +372,21 @@ RobinHoodHash *rh_create(size_t capacity, hash_func hash, key_eq_func key_eq,
     rh->free_key = free_key;
     rh->free_value = free_value;
 
+    // register free callbacks for EBR to use when reclaiming
+    ebr_set_free_callbacks(free_key, free_value);
+
     return rh;
 }
 
-// destroy map(note: leaked replaced/deleted Entry not freed here)
+// destroy map: attempt to free live entries and run scans; any outstanding retired entires may be freed too
 void rh_destroy(RobinHoodHash *rh) {
     if(!rh) return;
+    // free live entires
     for(size_t i = 0; i < rh->capacity; ++i){
         uintptr_t p = atomic_load(&rh->table[i]);
         if(p != 0 && p != TOMBSTONE){
             Entry *entry = entry_from_ptr(p);
-            if(rh->free_key){
+            if(rh->free_key && entry->key){
                 rh->free_key(entry->key);
             }
             void *v = atomic_load(&entry->value);
@@ -362,6 +398,10 @@ void rh_destroy(RobinHoodHash *rh) {
     }
     free(rh->table);
     free(rh);
+
+    // try to advance epoch and collect retired nodes
+    atomic_fetch_add(&global_epoch, 1);
+    ebr_scan();
 }
 
 // internal: compute index
@@ -371,6 +411,8 @@ static inline size_t index_for_hash(RobinHoodHash *rh, unsigned hash) {
 
 // insert / update (lock-free). returns 1 on insert, 2 on update, 0 on failure(should not happen)
 int rh_insert(RobinHoodHash *rh, void* key, void* value) {
+    ebr_enter();
+
     unsigned hash = rh->hash(key);
     size_t index = index_for_hash(rh, hash);
     Entry *new_entry = make_entry(key, value, 0);
@@ -380,7 +422,7 @@ int rh_insert(RobinHoodHash *rh, void* key, void* value) {
 
     size_t cap = rh->capacity;
     for(size_t probes = 0; probes < cap; ++probes) {
-        size_t i = (index + probes) % (cap - 1);
+        size_t i = (index + probes) & (cap - 1);
         uintptr_t cur = atomic_load(&rh->table[i]);
 
         // empty slot: try to CAS in
@@ -388,6 +430,7 @@ int rh_insert(RobinHoodHash *rh, void* key, void* value) {
             uintptr_t expected = cur;
             if(atomic_compare_exchange_strong(&rh->table[i], &expected, ptr_from_entry(new_entry))){
                 atomic_fetch_add(&rh->size, 1);
+                ebr_exit();
                 return 1; // inserted
             }else{
                 // CAS failed, retry same slot by reloading
@@ -409,6 +452,7 @@ int rh_insert(RobinHoodHash *rh, void* key, void* value) {
             free(new_entry);
             if (rh->free_value && oldv) {
                 rh->free_value(oldv);
+                ebr_exit();
                 return 2; // updated
             }            
         }
@@ -418,13 +462,13 @@ int rh_insert(RobinHoodHash *rh, void* key, void* value) {
             // attempt to CAS place new_entry here(only if unchanged)
             uintptr_t expected = cur;
             if(atomic_compare_exchange_strong(&rh->table[i], &expected, ptr_from_entry(new_entry))){
-                // success: slot now holds new_entry, the displaced is 'slot_e'
-                // we must continue inserting the displaced element with increased dist
-                // but we cannot modify slot_e in-place (other threads may see it).so create a copy with dist+1
+                // success: slot now holds new_e (owned by table), displaced 'slot_e' must be reinserted with dist+1
                 Entry *displaced = duplicate_entry_with_dist(slot_e, new_entry->dist + 1);
-                // note: original slot_e still exists in memory and is leaked (no reclamation here)
+                // retire original slot_e (since it's still present in memory but not referenced by table)
+                // but we must keep slot_e memory alive until reclaimed: retire it
+                ebr_retire_entry(slot_e);
                 new_entry = displaced;
-                // continue probing with new_entry (probes keeps moving)
+                // continue probing with new_entry
                 continue;
             }
             // CAS failed, reload and retry this slot
@@ -437,23 +481,36 @@ int rh_insert(RobinHoodHash *rh, void* key, void* value) {
         continue;
     }
     
-    // table full /couldn't insert 
-    // leak new_entry (or free key/value if desired)
+    // table full or couldn't insert 
+    // drop new_entry (retire or free)
+    if(rh->free_key){
+        rh->free_key(new_entry->key); // free the key wee created (caller my have passed ownership)
+    }
+    if(rh->free_value){
+        void *v = atomic_load(&new_entry->value);
+        if(v){
+            rh->free_value(v);
+        }
+    }
+    free(new_entry);
+    ebr_exit();
     return 0;
 }
 
 // get value pointer for key (returns stored value pointer or NULL)
 void* rh_get(RobinHoodHash *rh, const void* key) {
+    ebr_enter();
     unsigned hash = rh->hash(key);
     size_t index = index_for_hash(rh, hash);
     size_t cap = rh->capacity;
     int dist = 0;
 
     for(size_t probes = 0; probes < cap; ++probes) {
-        size_t i = (index + probes) % (cap - 1);
+        size_t i = (index + probes) & (cap - 1);
         uintptr_t cur = atomic_load(&rh->table[i]);
 
         if(cur == 0) {
+            ebr_exit();
             return NULL; // empty means not found
         }
         if(cur == TOMBSTONE){
@@ -463,30 +520,36 @@ void* rh_get(RobinHoodHash *rh, const void* key) {
 
         Entry *slot_e = entry_from_ptr(cur);
         if(rh->key_eq(slot_e->key, key)){
-            return atomic_load(&slot_e->value);
+            void *v = atomic_load(&slot_e->value);
+            ebr_exit();
+            return v;
         }
         // robin hood stop condition
         if(dist > slot_e->dist){
+            ebr_exit();
             return NULL;
         }
 
         dist++;
     }
+    ebr_exit();
     return NULL;
 }
 
 // delete key (returns 1 on success, 0 not found)
 int rh_delete(RobinHoodHash *rh, const void* key) {
+    ebr_enter();
     unsigned hash = rh->hash(key);
     size_t index = index_for_hash(rh, hash);
     size_t cap = rh->capacity;
     int dist = 0;
 
     for (size_t probes = 0; probes < cap; ++probes) {
-        size_t i = (index + probes) % (cap - 1);
+        size_t i = (index + probes) & (cap - 1);
         uintptr_t cur = atomic_load(&rh->table[i]);
 
         if (cur == 0) {
+            ebr_exit();
             return 0; // empty means not found
         }
         if (cur == TOMBSTONE) {
@@ -500,7 +563,9 @@ int rh_delete(RobinHoodHash *rh, const void* key) {
             uintptr_t expected = cur;
             if(atomic_compare_exchange_strong(&rh->table[i], &expected, TOMBSTONE)){
                 atomic_fetch_sub(&rh->size, 1);
-                // note: we do not free slot_e here(no reclamation)
+                // retire the removed entry for later reclaim
+                ebr_retire_entry(slot_e);
+                ebr_exit();
                 return 1;
             }
             // someone changed the slot; retry same index
@@ -509,16 +574,17 @@ int rh_delete(RobinHoodHash *rh, const void* key) {
         }
 
         if(dist > slot_e->dist){
+            ebr_exit();
             return 0;
         }
         dist++;
     }
+    ebr_exit();
     return 0;
 }
 
-/*
-* example for key=string, value=int*
-*/
+/* -------------------------------------------- example hash/eq/free for const char* -> int* -------------------------------------------- */
+
 unsigned str_hash(const void *p){
     const char *s = p;
     unsigned h = 2166136261u;
@@ -536,38 +602,101 @@ int str_eq(const void *a, const void *b){
 void free_int(void *p){ free(p); }
 void free_str(void *p){ free(p); }
 
-// simple single-thread test
-// -DTEST_SINGLE specify single-thread
+/* -------------------------------------------- simple test (multi-thread) -------------------------------------------- */
+// compile with -DTEST_MULTI and run
+
+#ifdef TEST_MULTI
+#define THREADS 4
+#define OPS_PER_THREAD 10000
+
+typedef struct {
+    RobinHoodHash *rh;
+    int id;
+} WorkerArg;
+
+void *worker(void *arg) {
+    WorkerArg *warg = arg;
+    // register thread for EBR
+    ebr_thread_register();
+
+    RobinHoodHash *rh = warg->rh;    
+    int id = warg->id;
+    char buf[64];
+    for (int i = 0; i < OPS_PER_THREAD; ++i) {
+        int k = id * OPS_PER_THREAD + i;
+        snprintf(buf, sizeof(buf), "key-%d", k);
+        char *ks = strdup(buf);
+        int *v = malloc(sizeof(int));
+        *v = k * 10;
+        rh_insert(rh, ks, v);
+
+        // occasionally lookup / delete
+        if(k & 7 == 0){
+            void *r = rh_get(rh, ks);
+            // don't free lookup result (map owns)
+            (void)r;
+            printf("key-%d: %d\n", k, *(int*)r);
+        }
+        if((i & 31) == 0){
+            rh_delete(rh, ks);
+            printf("deleted key-%d\n", k);
+        }
+    }
+    ebr_thread_unregister();
+    return NULL;
+}
+
+int main() {
+    RobinHoodHash *rh = rh_create(1<<16, str_hash, str_eq, free_str, free_int);
+    pthread_t th[THREADS];
+    WorkerArg warg[THREADS];
+    for (int i = 0; i < THREADS; ++i) {
+        warg[i].rh = rh;
+        warg[i].id = i;
+        pthread_create(&th[i], NULL, worker, &warg[i]);
+    }
+    for (int i = 0; i < THREADS; ++i) {
+        pthread_join(th[i], NULL);
+    }
+
+    // final scan & destroy
+    atomic_fetch_and(&global_epoch, 1);
+    ebr_scan();
+
+    rh_destroy(rh);
+    printf("done\n");
+    return 0;
+}
+#endif
+
+
+/* -------------------------------------------- simple test (single-thread) -------------------------------------------- */
+// compile with -DTEST_SINGLE and run
 #ifdef TEST_SINGLE
 int main() {
     RobinHoodHash *rh = rh_create(64, str_hash, str_eq, free_str, free_int);
-    for (int i = 0; i < 20; ++i) {
-        void* key = malloc(10);  // strdup("alice")
-        if(!sprintf(key, "key-%d", i)){
-            printf("error for malloc key.");
-            return 1;
-        }
-        int* value = malloc(sizeof(int));
-        *value = i*10;
-        rh_insert(rh, key, value);
-    }
 
-    void* k10 = malloc(10);
-    if(!sprintf(k10, "key-%d", 10)){
-        printf("error for malloc key-10.");
-        return 1;
-    }
-    const int *val = rh_get(rh, k10);
-    if (val) {
-        printf("key 10 -> %d\n", *val);
-    }
+    ebr_thread_register();
 
-    rh_delete(rh, k10);
-    val = rh_get(rh, k10);
-    printf("after delete: key key-10 -> %s\n", val ? "found" : "not found");
+    char *k = strdup("alice");
+    int *v = malloc(sizeof(int));
+    rh_insert(rh, k, v);
 
-    free(k10);
+    int *r = rh_get(rh, k);
+    printf("alice: %d\n", r ? *r : -1);
+
+    rh_delete(rh, k);
+    printf("deleted alice\n");
+    r = rh_get(rh, k);
+    printf("after delete: alice: %s\n", r ? "found" : "not found");
+
+    ebr_thread_unregister();
+
+    atomic_fetch_add(&global_epoch, 1);
+    ebr_scan();
+
     rh_destroy(rh);
+    printf("done\n");
     return 0;
 }
 #endif
