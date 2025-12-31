@@ -20,6 +20,8 @@ gcc -o $outfile \
     $dirname/xdg-shell-protocol.c \
     $(pkg-config --cflags --libs wayland-client wayland-egl egl glesv2)
 
+# rm xdg protocol file
+rm $dirname/xdg-shell-protocol.c $dirname/xdg-shell-client-protocol.h
 
 # run it
 $dirname/$outfile
