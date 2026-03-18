@@ -30,7 +30,7 @@ void string_1() {
     // memcpy: copy data from one array to another
     int num1[5] = {10, 20, 30, 40, 50};
     int num2[5];
-    memcpy(num1, num2, sizeof(num1));
+    memcpy(num2, num1, sizeof(num1));
     for (int i = 0; i < 5; ++i) {
         cout << num1[i] << ":" << num2[i] << endl;
     }

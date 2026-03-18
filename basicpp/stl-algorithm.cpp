@@ -199,7 +199,7 @@ void advance_alg2() {
     vector<string> newcars(6);
     replace_copy(cars.begin(), cars.end(), newcars.begin(), (string) "BMW",
                  (string) "Audi");
-    for (string car : cars) {
+    for (string car : newcars) {
         cout << car << " ";
     }
     cout << endl;
@@ -208,7 +208,7 @@ void advance_alg2() {
     vector<string> newcars2(6);
     replace_copy_if(cars.begin(), cars.end(), newcars2.begin(), has_o,
                     (string) "Audi");
-    for (string car : cars) {
+    for (string car : newcars2) {
         cout << car << " ";
     }
     cout << endl;

@@ -55,8 +55,15 @@ int main(int argc, char **argv) {
 
     map<string, int, greater<string>> people2 = {
         {"John", 32}, {"Adele", 45}, {"Bo", 29}};
-	cout<<"loop element ----"<<endl;
+	cout<<"loop element by greater key ----"<<endl;
     for (auto person : people2) {
+        cout << person.first << " is " << person.second << endl;
+    }
+
+    map<string, int, less<string>> people3 = {
+        {"John", 32}, {"Adele", 45}, {"Bo", 29}};
+	cout<<"loop element by less key ----"<<endl;
+    for (auto person : people3) {
         cout << person.first << " is " << person.second << endl;
     }
 

@@ -30,11 +30,11 @@ void demo_1(){
 
 	// returns the index (position) of the first occurrence of a string or character
 	string str2 = "hello, What is that, and What do you want?";
-	cout<<"first Waht is:"<<str2.find("What")<<endl;
+	cout<<"first What is:"<<str2.find("What")<<endl;
 	cout<<"from after index 10 the What is:"<<str2.find("What", 10)<<endl;
 
 	// returns the index (position) of the last occurrence of a string or character
-	cout<<"revert first Waht is:"<<str2.rfind("What")<<endl;
+	cout<<"revert first What is:"<<str2.rfind("What")<<endl;
 	cout<<"revert from after index 10 the What is:"<<str2.rfind("What", 10)<<endl;
 
 	// replaces a part of a string with another string
