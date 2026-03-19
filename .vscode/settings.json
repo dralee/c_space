@@ -1,6 +1,7 @@
 {
     "files.associations": {
         "limits.h": "c",
-        "iostream": "cpp"
-    }
+        "iostream": "cpp",
+    },
+    "C_Cpp.default.cppStandard": "c++20"
 }
