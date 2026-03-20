@@ -1,8 +1,12 @@
 #!/bin/bash
 # 2024.11.28 by dralee
 # 2026.3.19 by dralee warning
+# 2026.3.20 by dralee support build for debug or release version
 # $1: source file
-# $2: option, eg: 17, 20 for the g++ version
+# $2: option, debug is the default
+#   eg: 17, 20 for the g++ version
+#   release for release
+#   17-release for release with c++17
 file=$1
 opt=$2
 path=${file%/*} # file path
@@ -13,14 +17,31 @@ out_dir=out
 res_file=$out_dir/$raw_file.out
 
 mkdir -p $out_dir
-CC="gcc -Wall -Weffc++ -Wextra -Wconversion -Wsign-conversion" # force warnning
+CC="gcc -Wall -Weffc++ -Wextra -Wconversion -Wsign-conversion -pedantic-errors " # force warnning
 if [ "$ext" = "cpp" ]
 then
 	if [ ! -z "$opt" ];then
-		opt="-std=c++$opt"
+		if [[ "$opt" == *"-"* ]];then # 17-release
+			items=(${opt//-/ })
+			opt1=${items[0]}
+			opt2=${items[1]}
+			#echo "opt1: $opt1, opt2: $opt2"
+			if [ "$opt2" = "release" ];then
+				opt="$opt1 -O2 -DNDEBUG" # release
+			else
+				opt="$opt1 -ggdb" # debug
+			fi
+			opt="-std=c++$opt"
+		elif [ "$opt" = "release" ];then
+			opt="-O2 -DNDEBUG" # release
+		else
+			opt="-std=c++$opt -ggdb" # debug
+		fi		
 	fi
+	#echo the option is \"$opt\"
+	
 	#echo "option: $opt"
-	CC="g++ -Wall -Weffc++ -Wextra -Wconversion -Wsign-conversion $opt" # force warnning
+	CC="g++ -Wall -Weffc++ -Wextra -Wconversion -Wsign-conversion -pedantic-errors $opt" # force warnning
 	echo now the compiler is $CC
 fi
 
